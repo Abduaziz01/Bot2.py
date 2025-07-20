@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import re
 import json
+import base64
 import os
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
@@ -14,14 +15,19 @@ logger = logging.getLogger(__name__)
 # Bot token
 TOKEN = '7577232373:AAGeVYpD_XfDpzloO9dongsMx1258UwWxNY'
 
+# Directory for local images
+IMAGE_DIR = "images"
+if not os.path.exists(IMAGE_DIR):
+    os.makedirs(IMAGE_DIR)
+
 # States
 (
     CHOOSING, GET_NAME, GET_PHONE, WATER_SELECT, WATER_QUANTITY, CART_SHOW,
     LOCATION, DELIVERY_TIME, CONFIRM_ORDER, ADMIN_PANEL, ADD_DEMO_ADMIN, ADD_SUPER_ADMIN,
     BROADCAST_TEXT, DELETE_ORDER, ADD_CLIENT, DELETE_CLIENT, SEARCH_CLIENT,
     COURIER_PANEL, COURIER_STATUS, COURIER_ORDER_ACTION, ADD_COURIER, COURIER_DEBT_UPDATE,
-    EDIT_PROMO, MY_ORDERS, ADD_TEMP_ADMIN, DELETE_COURIER, ADD_DEBT
-) = range(27)
+    EDIT_PROMO, MY_ORDERS
+) = range(24)
 
 # Configuration
 WATER_SIZES = {"5L": 5000, "10L": 7000, "19L": 18000}
@@ -48,8 +54,8 @@ def init_db():
             c = conn.cursor()
             c.execute('''CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                name TEXT,
-                phone TEXT UNIQUE,
+                name TEXT NOT NULL,
+                phone TEXT UNIQUE NOT NULL,
                 address TEXT
             )''')
             c.execute('''CREATE TABLE IF NOT EXISTS orders (
@@ -62,16 +68,14 @@ def init_db():
                 delivery_time TEXT,
                 status TEXT DEFAULT 'pending',
                 courier_id INTEGER,
-                order_date TEXT,
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )''')
             c.execute('''CREATE TABLE IF NOT EXISTS debts (
-                user_id INTEGER,
-                phone TEXT,
+                user_id INTEGER PRIMARY KEY,
                 coolers INTEGER DEFAULT 0,
                 bottles INTEGER DEFAULT 0,
                 debt INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, phone)
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )''')
             c.execute('''CREATE TABLE IF NOT EXISTS couriers (
                 courier_id INTEGER PRIMARY KEY,
@@ -92,16 +96,32 @@ def init_db():
             )''')
             c.execute("INSERT OR IGNORE INTO bot_data (key, value) VALUES (?, ?)", ('super_admins', json.dumps([6999672555])))
             c.execute("INSERT OR IGNORE INTO bot_data (key, value) VALUES (?, ?)", ('demo_admins', json.dumps([])))
-            c.execute("INSERT OR IGNORE INTO bot_data (key, value) VALUES (?, ?)", ('temp_admins', json.dumps({})))
+            c.execute("INSERT OR IGNORE INTO bot_data (key, value) VALUES (?, ?)", ('temp_admins', json.dumps({6999672555: (datetime.now() + timedelta(hours=24)).isoformat()})))
             c.execute("INSERT OR IGNORE INTO bot_data (key, value) VALUES (?, ?)", ('couriers', json.dumps({})))
             c.execute("INSERT OR IGNORE INTO bot_data (key, value) VALUES (?, ?)", ('promos', json.dumps([
-                {"text": "5 ta 19L suv xarid qiling, 1 ta bepul!"},
-                {"text": "Har 10 ta bokalga 1 ta kuller bepul!"},
-                {"text": "Birinchi buyurtmada 10% chegirma!"}
-            ])))
+    {"text": "5 ta 19L suv xarid qiling, 1 ta bepul!", "image": r"C:\Users\ADMIN\OneDrive\Рабочий стол\abduaziz\images\promo1.jpg"},
+    {"text": "Har 10 ta bokalga 1 ta kuller bepul!", "image": r"C:\Users\ADMIN\OneDrive\Рабочий стол\abduaziz\images\promo2.jpg"},
+    {"text": "Birinchi buyurtmada 10% chegirma!", "image": r"C:\Users\ADMIN\OneDrive\Рабочий стол\abduaziz\images\promo3.jpg"}
+])))
             conn.commit()
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in init_db: {e}")
+
+def save_image_to_local(filename):
+    image_path = os.path.join(IMAGE_DIR, filename)
+    if not os.path.exists(image_path):
+        with open(image_path, 'wb') as f:
+            f.write(b'')
+    return image_path
+
+def image_to_base64(image_path):
+    try:
+        with open(image_path, 'rb') as image_file:
+            encoded = base64.b64encode(image_file.read()).decode('utf-8')
+            return f"data:image/jpeg;base64,{encoded}"
+    except FileNotFoundError:
+        logger.error(f"Image not found: {image_path}")
+        return None
 
 def load_global_data():
     global SUPER_ADMINS, DEMO_ADMINS, TEMP_ADMINS, COURIERS, PROMOS
@@ -112,24 +132,13 @@ def load_global_data():
             data = {row[0]: json.loads(row[1]) for row in c.fetchall()}
             SUPER_ADMINS = set(data.get('super_admins', [6999672555]))
             DEMO_ADMINS = set(data.get('demo_admins', []))
-            temp_admins = data.get('temp_admins', {})
-            TEMP_ADMINS = {}
-            now = datetime.now()
-            for k, v in temp_admins.items():
-                expiry = datetime.fromisoformat(v)
-                if now < expiry:
-                    TEMP_ADMINS[int(k)] = expiry
+            TEMP_ADMINS = {int(k): datetime.fromisoformat(v) for k, v in data.get('temp_admins', {6999672555: (datetime.now() + timedelta(hours=24)).isoformat()}).items()}
+            COURIERS = {int(k): v for k, v in data.get('couriers', {}).items()}
             PROMOS = data.get('promos', [
-                {"text": "5 ta 19L suv xarid qiling, 1 ta bepul!"},
-                {"text": "Har 10 ta bokalga 1 ta kuller bepul!"},
-                {"text": "Birinchi buyurtmada 10% chegirma!"}
+                {"text": "5 ta 19L suv xarid qiling, 1 ta bepul!", "image": save_image_to_local("promo1.jpg")},
+                {"text": "Har 10 ta bokalga 1 ta kuller bepul!", "image": save_image_to_local("promo2.jpg")},
+                {"text": "Birinchi buyurtmada 10% chegirma!", "image": save_image_to_local("promo3.jpg")}
             ])
-            # Load couriers from the couriers table
-            COURIERS.clear()  # Clear existing COURIERS to avoid duplicates
-            c.execute("SELECT courier_id, name, phone, status FROM couriers")
-            for courier in c.fetchall():
-                COURIERS[courier[0]] = {'name': courier[1], 'phone': courier[2], 'status': courier[3]}
-            save_global_data()
     except (sqlite3.OperationalError, json.JSONDecodeError) as e:
         logger.error(f"Error loading global data: {e}")
 
@@ -198,12 +207,10 @@ def admin_panel_buttons(user_id):
         return ReplyKeyboardMarkup([
             ["📋 Buyurtmalar ro‘yxati", "📊 Statistika"],
             ["➕ Super admin qo‘shish", "➕ Demo admin qo‘shish"],
-            ["➕ Temp admin qo‘shish", "➕ Qarz qo‘shish"],
             ["➕ Mijoz qo‘shish", "🗑 Mijoz o‘chirish"],
             ["🔍 Mijoz qidirish", "🛑 Buyurtmani o‘chirish"],
             ["📤 Broadcast yuborish", "📢 Aksiyalarni tahrirlash"],
-            ["➕ Kuryer qo‘shish", "🗑 Kuryer o‘chirish"],
-            ["📊 Kuryerlar statistikasi"],
+            ["➕ Kuryer qo‘shish", "📊 Kuryerlar statistikasi"],
             ["⬅️ Ortga", "🏠 Asosiy menyu"]
         ], resize_keyboard=True)
     else:
@@ -223,9 +230,9 @@ def courier_panel_buttons():
 def order_action_buttons(order_id, status='pending'):
     buttons = []
     if status == 'pending':
-        buttons.append(InlineKeyboardButton("Buyurtmani Oldim", callback_data=f"take/{order_id}"))
+        buttons.append(InlineKeyboardButton("Buyurtmani Oldim", callback_data=f"take_{order_id}"))
     if status in ['pending', 'taken']:
-        buttons.append(InlineKeyboardButton("Yetkazildi", callback_data=f"deliver/{order_id}"))
+        buttons.append(InlineKeyboardButton("Yetkazildi", callback_data=f"deliver_{order_id}"))
     return InlineKeyboardMarkup([buttons])
 
 # Permission checks
@@ -260,41 +267,10 @@ def add_user_to_db(user_id, name, phone, address=None):
             c = conn.cursor()
             c.execute("INSERT OR REPLACE INTO users (user_id, name, phone, address) VALUES (?, ?, ?, ?)",
                       (user_id, name, phone, address))
-            c.execute("INSERT OR IGNORE INTO debts (user_id, phone, coolers, bottles, debt) VALUES (?, ?, 0, 0, 0)", (user_id, phone))
-            c.execute("UPDATE debts SET user_id = ? WHERE phone = ? AND user_id IS NULL", (user_id, phone))
+            c.execute("INSERT OR IGNORE INTO debts (user_id, coolers, bottles, debt) VALUES (?, 0, 0, 0)", (user_id,))
             conn.commit()
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in add_user_to_db: {e}")
-
-def add_debt_to_db(user_id, phone, debt):
-    try:
-        with sqlite3.connect('water_bot.db', timeout=10) as conn:
-            c = conn.cursor()
-            if user_id:
-                c.execute("SELECT debt FROM debts WHERE user_id = ? AND phone = ?", (user_id, phone))
-                existing_debt = c.fetchone()
-                if existing_debt:
-                    new_debt = existing_debt[0] + debt
-                    c.execute("UPDATE debts SET debt = ? WHERE user_id = ? AND phone = ?", (new_debt, user_id, phone))
-                    action = "yangilandi"
-                else:
-                    c.execute("INSERT INTO debts (user_id, phone, coolers, bottles, debt) VALUES (?, ?, 0, 0, ?)", (user_id, phone, debt))
-                    action = "qo‘shildi"
-            else:
-                c.execute("SELECT debt FROM debts WHERE phone = ?", (phone,))
-                existing_debt = c.fetchone()
-                if existing_debt:
-                    new_debt = existing_debt[0] + debt
-                    c.execute("UPDATE debts SET debt = ? WHERE phone = ?", (new_debt, phone))
-                    action = "yangilandi"
-                else:
-                    c.execute("INSERT INTO debts (phone, coolers, bottles, debt) VALUES (?, 0, 0, ?)", (phone, debt))
-                    action = "qo‘shildi"
-            conn.commit()
-            return action
-    except sqlite3.OperationalError as e:
-        logger.error(f"Database error in add_debt_to_db: {e}")
-        return None
 
 def add_courier_to_db(courier_id, name, phone):
     try:
@@ -303,22 +279,10 @@ def add_courier_to_db(courier_id, name, phone):
             c.execute("INSERT OR REPLACE INTO couriers (courier_id, name, phone, status) VALUES (?, ?, ?, ?)",
                       (courier_id, name, phone, 'free'))
             conn.commit()
-        COURIERS[courier_id] = {'name': name, 'phone': phone, 'status': 'free'}
+        COURIERS[courier_id] = {'status': 'free', 'name': name, 'phone': phone}
         save_global_data()
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in add_courier_to_db: {e}")
-
-def remove_courier_from_db(courier_id):
-    try:
-        with sqlite3.connect('water_bot.db', timeout=10) as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM couriers WHERE courier_id = ?", (courier_id,))
-            c.execute("DELETE FROM courier_orders WHERE courier_id = ?", (courier_id,))
-            conn.commit()
-        COURIERS.pop(courier_id, None)
-        save_global_data()
-    except sqlite3.OperationalError as e:
-        logger.error(f"Database error in remove_courier_from_db: {e}")
 
 def remove_user_from_db(phone):
     try:
@@ -326,7 +290,7 @@ def remove_user_from_db(phone):
             c = conn.cursor()
             c.execute("DELETE FROM users WHERE phone = ?", (phone,))
             c.execute("DELETE FROM orders WHERE phone = ?", (phone,))
-            c.execute("DELETE FROM debts WHERE phone = ?", (phone,))
+            c.execute("DELETE FROM debts WHERE user_id IN (SELECT user_id FROM users WHERE phone = ?)", (phone,))
             conn.commit()
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in remove_user_from_db: {e}")
@@ -338,7 +302,7 @@ def get_user_by_id(user_id):
             c.execute("SELECT user_id, name, phone, address FROM users WHERE user_id = ?", (user_id,))
             user = c.fetchone()
             if user:
-                c.execute("SELECT coolers, bottles, debt FROM debts WHERE user_id = ?", (user_id,))
+                c.execute("SELECT coolers, bottles, debt FROM debts WHERE user_id = ?", (user[0],))
                 debt_info = c.fetchone()
                 c.execute("SELECT order_id, cart, address, delivery_time, status, courier_id FROM orders WHERE user_id = ?", (user[0],))
                 orders = c.fetchall()
@@ -360,43 +324,32 @@ def get_user_by_phone(phone):
     try:
         with sqlite3.connect('water_bot.db', timeout=10) as conn:
             c = conn.cursor()
-            # Query the users table
             c.execute("SELECT user_id, name, phone, address FROM users WHERE phone = ?", (phone,))
             user = c.fetchone()
-            # Query the debts table
-            c.execute("SELECT coolers, bottles, debt FROM debts WHERE phone = ?", (phone,))
-            debt_info = c.fetchone()
-            # Query orders for the phone number
-            c.execute("SELECT order_id, cart, address, delivery_time, status, courier_id FROM orders WHERE phone = ?", (phone,))
-            orders = c.fetchall()
-            return {
-                'user_id': user[0] if user else None,
-                'name': user[1] if user else None,
-                'phone': phone,
-                'address': user[3] if user else None,
-                'coolers': debt_info[0] if debt_info else 0,
-                'bottles': debt_info[1] if debt_info else 0,
-                'debt': debt_info[2] if debt_info else 0,
-                'orders': orders
-            }
+            if user:
+                c.execute("SELECT coolers, bottles, debt FROM debts WHERE user_id = ?", (user[0],))
+                debt_info = c.fetchone()
+                c.execute("SELECT order_id, cart, address, delivery_time, status, courier_id FROM orders WHERE user_id = ?", (user[0],))
+                orders = c.fetchall()
+                return {
+                    'user_id': user[0],
+                    'name': user[1],
+                    'phone': user[2],
+                    'address': user[3],
+                    'coolers': debt_info[0] if debt_info else 0,
+                    'bottles': debt_info[1] if debt_info else 0,
+                    'debt': debt_info[2] if debt_info else 0,
+                    'orders': orders
+                }
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in get_user_by_phone: {e}")
-        return {
-            'user_id': None,
-            'name': None,
-            'phone': phone,
-            'address': None,
-            'coolers': 0,
-            'bottles': 0,
-            'debt': 0,
-            'orders': []
-        }
+    return None
 
 def get_top_customer():
     try:
         with sqlite3.connect('water_bot.db', timeout=10) as conn:
             c = conn.cursor()
-            c.execute("SELECT user_id, users.name, phone, COUNT(*) as order_count FROM orders JOIN users USING (user_id) WHERE status = 'delivered' GROUP BY user_id ORDER BY order_count DESC LIMIT 1")
+            c.execute("SELECT user_id, users.name, phone, COUNT(*) as order_count FROM orders JOIN users USING (user_id) GROUP BY user_id ORDER BY order_count DESC LIMIT 1")
             return c.fetchone()
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in get_top_customer: {e}")
@@ -406,64 +359,21 @@ def get_all_orders():
     try:
         with sqlite3.connect('water_bot.db', timeout=10) as conn:
             c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM orders WHERE status = 'delivered'")
+            c.execute("SELECT COUNT(*) FROM orders")
             return c.fetchone()[0]
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in get_all_orders: {e}")
     return 0
 
-def get_daily_orders():
+def update_debt(user_id, coolers=0, bottles=0, debt=0):
     try:
         with sqlite3.connect('water_bot.db', timeout=10) as conn:
             c = conn.cursor()
-            today = datetime.now().strftime('%Y-%m-%d')
-            c.execute("SELECT COUNT(*) FROM orders WHERE status = 'delivered' AND order_date LIKE ?", (f'{today}%',))
-            return c.fetchone()[0]
-    except sqlite3.OperationalError as e:
-        logger.error(f"Database error in get_daily_orders: {e}")
-    return 0
-
-def get_monthly_orders():
-    try:
-        with sqlite3.connect('water_bot.db', timeout=10) as conn:
-            c = conn.cursor()
-            month = datetime.now().strftime('%Y-%m')
-            c.execute("SELECT COUNT(*) FROM orders WHERE status = 'delivered' AND order_date LIKE ?", (f'{month}%',))
-            return c.fetchone()[0]
-    except sqlite3.OperationalError as e:
-        logger.error(f"Database error in get_monthly_orders: {e}")
-    return 0
-
-def get_yearly_orders():
-    try:
-        with sqlite3.connect('water_bot.db', timeout=10) as conn:
-            c = conn.cursor()
-            year = datetime.now().strftime('%Y')
-            c.execute("SELECT COUNT(*) FROM orders WHERE status = 'delivered' AND order_date LIKE ?", (f'{year}%',))
-            return c.fetchone()[0]
-    except sqlite3.OperationalError as e:
-        logger.error(f"Database error in get_yearly_orders: {e}")
-    return 0
-
-def update_debt(user_id, phone, coolers=0, bottles=0, debt=0):
-    try:
-        with sqlite3.connect('water_bot.db', timeout=10) as conn:
-            c = conn.cursor()
-            if user_id:
-                c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-                if c.fetchone():
-                    c.execute("UPDATE debts SET coolers = coolers + ?, bottles = bottles + ?, debt = debt + ? WHERE user_id = ?",
-                              (coolers, bottles, debt, user_id))
-                else:
-                    c.execute("INSERT INTO debts (user_id, phone, coolers, bottles, debt) VALUES (?, ?, ?, ?, ?)",
-                              (user_id, phone, coolers, bottles, debt))
-            else:
-                c.execute("UPDATE debts SET coolers = coolers + ?, bottles = bottles + ?, debt = debt + ? WHERE phone = ?",
-                          (coolers, bottles, debt, phone))
-                if conn.total_changes == 0:
-                    c.execute("INSERT INTO debts (phone, coolers, bottles, debt) VALUES (?, ?, ?, ?)",
-                              (phone, coolers, bottles, debt))
-            conn.commit()
+            c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+            if c.fetchone():
+                c.execute("UPDATE debts SET coolers = coolers + ?, bottles = bottles + ?, debt = debt + ? WHERE user_id = ?",
+                          (coolers, bottles, debt, user_id))
+                conn.commit()
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in update_debt: {e}")
 
@@ -505,17 +415,10 @@ def get_free_couriers():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
-    user_data = get_user_by_id(user_id)
-    if user_data and user_data['debt'] > 0:
-        await update.message.reply_text(
-            f"Assalomu alaykum, {user.first_name}!\nSizda {user_data['debt']} so‘m qarz mavjud.\n\n{RULES}\n\nBuyurtma berish uchun pastdagi tugmalardan foydalaning.",
-            reply_markup=main_menu(user_id)
-        )
-    else:
-        await update.message.reply_text(
-            f"Assalomu alaykum, {user.first_name}!\n\n{RULES}\n\nBuyurtma berish uchun pastdagi tugmalardan foydalaning.",
-            reply_markup=main_menu(user_id)
-        )
+    await update.message.reply_text(
+        f"Assalomu alaykum, {user.first_name}!\n\n{RULES}\n\nBuyurtma berish uchun pastdagi tugmalardan foydalaning.",
+        reply_markup=main_menu(user_id)
+    )
     return CHOOSING
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -528,7 +431,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🎉 Aksiyalar":
         for i, promo in enumerate(PROMOS, 1):
-            await update.message.reply_text(f"{i}. {promo['text']}")
+            msg = f"{i}. {promo['text']}"
+            image_path = promo['image']
+            if os.path.exists(image_path):
+                with open(image_path, 'rb') as photo:
+                    await update.message.reply_photo(photo=photo, caption=msg)
+            else:
+                await update.message.reply_text(msg + "\n(Rasm topilmadi)")
         await update.message.reply_text("Asosiy menyuga qaytish uchun tugmani bosing.", reply_markup=main_menu(user_id))
         return CHOOSING
 
@@ -590,184 +499,341 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
         return CHOOSING
     if len(text) < 3 or not all(x.isalpha() or x.isspace() for x in text):
-        await update.message.reply_text("Iltimos, to‘g‘ri ism kiriting (faqat harflar):", reply_markup=back_button())
+        await update.message.reply_text("Iltimos, to‘g‘ri ismingizni kiriting (faqat harflar).")
         return GET_NAME
     context.user_data['name'] = text
-    user_data = get_user_by_id(user_id)
-    phone = user_data['phone'] if user_data else None
-    address = user_data['address'] if user_data else None
-    await update.message.reply_text("Telefon raqamingizni kiriting (masalan, +998901234567):", reply_markup=saved_data_buttons(phone, address))
+    await update.message.reply_text("Telefon raqamingizni +998XXYYYYYYY formatda kiriting:", reply_markup=back_button())
     return GET_PHONE
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
+    if text in ["⬅️ Ortga"]:
+        await update.message.reply_text("Ism so‘rashga qaytdingiz.", reply_markup=back_button())
+        return GET_NAME
+    if text == "🏠 Asosiy menyu":
         await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
         return CHOOSING
-    if text.startswith("Ispolzovat:"):
-        phone = text.split(",")[0].replace("Ispolzovat:", "").strip()
-        context.user_data['phone'] = phone
-        user_data = get_user_by_phone(phone)
-        context.user_data['address'] = user_data['address']
-        await update.message.reply_text("Suv hajmini tanlang:", reply_markup=water_size_buttons())
-        return WATER_SELECT
-    if text == "Yangi nomer va manzil":
-        await update.message.reply_text("Iltimos, telefon raqamingizni kiriting (masalan, +998901234567):", reply_markup=back_button())
-        return GET_PHONE
-    if not re.match(r'^\+998[0-9]{9}$', text):
-        await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini kiriting (masalan, +998901234567):", reply_markup=back_button())
+    if not re.fullmatch(r'\+998\d{9}', text):
+        await update.message.reply_text("Telefon raqamingiz noto‘g‘ri. +998XXYYYYYYY formatda kiriting.")
         return GET_PHONE
     context.user_data['phone'] = text
     add_user_to_db(user_id, context.user_data['name'], text)
-    await update.message.reply_text("Suv hajmini tanlang:", reply_markup=water_size_buttons())
-    return WATER_SELECT
+    user = get_user_by_id(user_id)
+    if user and user['phone'] and user['address']:
+        context.user_data['name'] = user['name']
+        context.user_data['phone'] = user['phone']
+        context.user_data['address'] = user['address']
+        await update.message.reply_text("Ma'lumotlarni tanlang:", reply_markup=saved_data_buttons(user['phone'], user['address']))
+        return WATER_SELECT
+    else:
+        await update.message.reply_text("Suv hajmini tanlang:", reply_markup=water_size_buttons())
+        return WATER_SELECT
 
 async def water_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
+    if text in ["⬅️ Ortga"]:
+        user = get_user_by_id(user_id)
+        if user and user['phone'] and user['address']:
+            await update.message.reply_text("Ma'lumotlarni tanlang:", reply_markup=saved_data_buttons(user['phone'], user['address']))
+        else:
+            await update.message.reply_text("Telefon raqamingizni +998XXYYYYYYY formatda kiriting:", reply_markup=back_button())
+        return GET_PHONE
+    if text == "🏠 Asosiy menyu":
         await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
         return CHOOSING
-    if text not in WATER_SIZES:
-        await update.message.reply_text("Iltimos, suv hajmini tanlang:", reply_markup=water_size_buttons())
-        return WATER_SELECT
-    context.user_data['current_size'] = text
-    await update.message.reply_text(f"Nechta {text} suv sotib olmoqchisiz? (1 dan {MAX_QUANTITY} gacha)", reply_markup=quantity_buttons())
-    return WATER_QUANTITY
+    if text in WATER_SIZES.keys():
+        context.user_data['current_size'] = text
+        await update.message.reply_text(f"Nechta {text} suv sotib olmoqchisiz? (1 dan {MAX_QUANTITY} gacha)", reply_markup=quantity_buttons())
+        return WATER_QUANTITY
+    if text.startswith("Ispolzovat:") or text == "Yangi nomer va manzil":
+        return await location_handler(update, context)
+    await update.message.reply_text("Iltimos, suv hajmini tanlang:", reply_markup=water_size_buttons())
+    return WATER_SELECT
 
 async def water_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
-        await update.message.reply_text("Suv hajmini tanlang:", reply_markup=water_size_buttons())
+    if text in ["⬅️ Ortga"]:
+        await update.message.reply_text("Suv hajmi tanlashga qaytdingiz.", reply_markup=water_size_buttons())
         return WATER_SELECT
-    if not text.isdigit() or int(text) < 1 or int(text) > MAX_QUANTITY:
-        await update.message.reply_text(f"Iltimos, 1 dan {MAX_QUANTITY} gacha son kiriting:", reply_markup=quantity_buttons())
-        return WATER_QUANTITY
-    size = context.user_data['current_size']
-    context.user_data['cart'][size] = context.user_data['cart'].get(size, 0) + int(text)
-    await update.message.reply_text("Yana suv qo‘shasizmi yoki savatchani ko‘rasizmi?", reply_markup=ReplyKeyboardMarkup([
-        ["➕ Yana qo‘shish"], ["🛒 Savatchani ko‘rish"], ["⬅️ Ortga", "🏠 Asosiy menyu"]
-    ], resize_keyboard=True))
-    return CART_SHOW
-
-async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user_id = update.effective_user.id
-    cart = context.user_data.get('cart', {})
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
+    if text == "🏠 Asosiy menyu":
         await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
         return CHOOSING
-    if text == "➕ Yana qo‘shish":
-        await update.message.reply_text("Suv hajmini tanlang:", reply_markup=water_size_buttons())
-        return WATER_SELECT
+    if not text.isdigit() or not (1 <= int(text) <= MAX_QUANTITY):
+        await update.message.reply_text(f"Iltimos, 1 dan {MAX_QUANTITY} gacha son kiriting.")
+        return WATER_QUANTITY
+    quantity = int(text)
+    size = context.user_data.get('current_size')
+    if not size:
+        await update.message.reply_text("Suv hajmi topilmadi, qaytadan boshlang.", reply_markup=main_menu(user_id))
+        return CHOOSING
+    cart = context.user_data.get('cart', {})
+    cart[size] = cart.get(size, 0) + quantity
+    context.user_data['cart'] = cart
+    total = sum(WATER_SIZES[size] * count for size, count in cart.items())
+    await update.message.reply_text(
+        f"{quantity} dona {size} suv savatchaga qo‘shildi.\n"
+        f"Savatchada: {', '.join([f'{s}: {c} dona' for s, c in cart.items()])}\n"
+        f"Jami: {total} so'm\n"
+        f"Yana suv qo‘shish uchun hajm tanlang yoki Asosiy Menu ni bosib '🛒 Savatcha' bilan davom eting.",
+        reply_markup=water_size_buttons()
+    )
+    return WATER_SELECT
+
+async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cart = context.user_data.get('cart', {})
     if not cart:
-        await update.message.reply_text("Savatchangiz bo‘sh. Suv qo‘shish uchun tanlang:", reply_markup=water_size_buttons())
-        return WATER_SELECT
-    total = sum(WATER_SIZES[size] * qty for size, qty in cart.items())
-    cart_text = "\n".join(f"{size}: {qty} ta - {WATER_SIZES[size] * qty} so‘m" for size, qty in cart.items())
-    await update.message.reply_text(f"Savatchangiz:\n{cart_text}\n\nJami: {total} so‘m\n\nManzilni kiriting:", reply_markup=location_buttons())
-    return LOCATION
+        await update.message.reply_text("Savatcha bo‘sh.", reply_markup=main_menu(user_id))
+        return CHOOSING
+    msg = "Savatchangizdagi buyurtmalar:\n"
+    total = 0
+    for size, count in cart.items():
+        price = WATER_SIZES[size] * count
+        total += price
+        msg += f"{size} - {count} dona - {price} so'm\n"
+    msg += f"\nJami: {total} so'm\n\n"
+
+    user = get_user_by_id(user_id)
+    if user and user['phone'] and user['address']:
+        context.user_data['name'] = user['name']
+        context.user_data['phone'] = user['phone']
+        context.user_data['address'] = user['address']
+        msg += "Iltimos, ma'lumotlarni tanlang:"
+        await update.message.reply_text(msg, reply_markup=saved_data_buttons(user['phone'], user['address']))
+        return LOCATION
+    else:
+        msg += "Iltimos, manzilingizni kiriting yoki geolokatsiyani yuboring:"
+        await update.message.reply_text(msg, reply_markup=location_buttons())
+        return LOCATION
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if update.message.location:
-        latitude = update.message.location.latitude
-        longitude = update.message.location.longitude
-        context.user_data['address'] = f"Geo: {latitude}, {longitude}"
+    user = get_user_by_id(user_id)
+    location = update.message.location
+    text = update.message.text.strip() if update.message.text else None
+
+    if text in ["⬅️ Ortga"]:
+        await update.message.reply_text("Savatcha ko‘rsatildi.", reply_markup=water_size_buttons())
+        return WATER_SELECT
+    if text == "🏠 Asosiy menyu":
+        await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
+        return CHOOSING
+
+    if text == "✍️ Manzilni qo‘lda kiritish":
+        await update.message.reply_text(
+            "Iltimos, manzilni yoki havolani kiriting (masalan, https://maps.google.com/... yoki A.Baxodirox 201 4):",
+            reply_markup=back_button()
+        )
+        return LOCATION
+
+    if location:  # User shared location via button
+        maps_url = f"https://maps.google.com/?q={location.latitude},{location.longitude}"
+        context.user_data['address'] = maps_url
+        try:
+            with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("UPDATE users SET address = ? WHERE user_id = ?", (maps_url, user_id))
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.error(f"Database error in location_handler: {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=location_buttons())
+            return LOCATION
+        await update.message.reply_text(f"Manzil qabul qilindi: {maps_url}\nYetkazib berish vaqtini kiriting (masalan, 12-14):", reply_markup=back_button())
+        return DELIVERY_TIME
+
+    if text and text == f"Ispolzovat: {user['phone']}, {user['address']}" and user:
+        context.user_data['phone'] = user['phone']
+        context.user_data['address'] = user['address']
         await update.message.reply_text("Yetkazib berish vaqtini kiriting (masalan, 12-14):", reply_markup=back_button())
         return DELIVERY_TIME
-    text = update.message.text.strip()
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
-        await update.message.reply_text("Savatchangizni ko‘rish uchun:", reply_markup=ReplyKeyboardMarkup([["🛒 Savatchani ko‘rish"], ["⬅️ Ortga", "🏠 Asosiy menyu"]], resize_keyboard=True))
-        return CART_SHOW
-    if text == "✍️ Manzilni qo‘lda kiritish":
-        await update.message.reply_text("Iltimos, manzilni matn sifatida kiriting:", reply_markup=back_button())
+    elif text and text == "Yangi nomer va manzil":
+        await update.message.reply_text("Iltimos, ismingizni kiriting:", reply_markup=back_button())
+        return GET_NAME
+    elif text:
+        # Accept either a URL or a text address
+        if text.startswith(("http://", "https://")) and not re.match(r'https?://(maps\.google\.com|yandex\.uz/maps|2gis\.uz)/.*', text):
+            await update.message.reply_text(
+                "Iltimos, to‘g‘ri manzil havolasini yuboring (masalan, Google Maps, Yandex Maps):",
+                reply_markup=location_buttons()
+            )
+            return LOCATION
+        context.user_data['address'] = text
+        try:
+            with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("UPDATE users SET address = ? WHERE user_id = ?", (text, user_id))
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.error(f"Database error in location_handler: {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=location_buttons())
+            return LOCATION
+        await update.message.reply_text("Yetkazib berish vaqtini kiriting (masalan, 12-14):", reply_markup=back_button())
+        return DELIVERY_TIME
+    else:
+        await update.message.reply_text(
+            "Iltimos, manzilni avtomatik yuboring yoki qo‘lda kiriting:",
+            reply_markup=location_buttons()
+        )
         return LOCATION
-    context.user_data['address'] = text
-    await update.message.reply_text("Yetkazib berish vaqtini kiriting (masalan, 12-14):", reply_markup=back_button())
-    return DELIVERY_TIME
 
 async def delivery_time_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
-        await update.message.reply_text("Manzilni kiriting:", reply_markup=location_buttons())
+    if text in ["⬅️ Ortga"]:
+        user = get_user_by_id(user_id)
+        if user and user['phone'] and user['address']:
+            await update.message.reply_text("Ma'lumotlarni tanlang:", reply_markup=saved_data_buttons(user['phone'], user['address']))
+        else:
+            await update.message.reply_text("Manzilni qaytadan kiriting yoki geolokatsiyani yuboring.", reply_markup=location_buttons())
         return LOCATION
+    if text == "🏠 Asosiy menyu":
+        await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
+        return CHOOSING
+
     if not re.match(r'^\d{1,2}-\d{1,2}$', text):
-        await update.message.reply_text("Iltimos, vaqt oralig‘ini to‘g‘ri kiriting (masalan, 12-14):", reply_markup=back_button())
+        await update.message.reply_text("Iltimos, yetkazib berish vaqtini to‘g‘ri formatda kiriting (masalan, 12-14):", reply_markup=back_button())
         return DELIVERY_TIME
+
     context.user_data['delivery_time'] = text
-    cart = context.user_data['cart']
-    total = sum(WATER_SIZES[size] * qty for size, qty in cart.items())
-    cart_text = "\n".join(f"{size}: {qty} ta - {WATER_SIZES[size] * qty} so‘m" for size, qty in cart.items())
-    await update.message.reply_text(
-        f"Buyurtmangiz:\n{cart_text}\n\nJami: {total} so‘m\nManzil: {context.user_data['address']}\nYetkazib berish vaqti: {text}\n\nTasdiqlaysizmi?",
-        reply_markup=confirm_buttons()
+
+    cart = context.user_data.get('cart', {})
+    total = sum(WATER_SIZES[size] * count for size, count in cart.items())
+    order_summary = "\n".join([f"{size} - {count} dona" for size, count in cart.items()])
+    address = context.user_data['address']
+
+    confirm_msg = (
+        f"Buyurtmangizni tasdiqlang:\n\n"
+        f"Ism: {context.user_data['name']}\n"
+        f"Telefon: {context.user_data['phone']}\n"
+        f"Suvlar:\n{order_summary}\n"
+        f"Yetkazib berish vaqti: {text}\n"
+        f"Jami to‘lov: {total} so'm\n"
+        f"Manzil: {address}\n\n"
+        "Tasdiqlash uchun 'Ha', bekor qilish uchun 'Bekor qilaman' deb yozing."
     )
+    await update.message.reply_text(confirm_msg, reply_markup=confirm_buttons())
     return CONFIRM_ORDER
 
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = update.message.text.strip().lower()
     user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
-        await update.message.reply_text("Yetkazib berish vaqtini kiriting:", reply_markup=back_button())
-        return DELIVERY_TIME
-    if text == "Bekor qilaman":
+
+    if text == "⬅️ ortga":
+        user = get_user_by_id(user_id)
+        if user and user['phone'] and user['address']:
+            await update.message.reply_text("Ma'lumotlarni tanlang:", reply_markup=saved_data_buttons(user['phone'], user['address']))
+        else:
+            await update.message.reply_text("Manzilni qaytadan kiriting yoki geolokatsiyani yuboring.", reply_markup=location_buttons())
+        return LOCATION
+    if text == "🏠 asosiy menyu":
+        await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
+        return CHOOSING
+
+    if text == "ha":
+        if all_couriers_busy():
+            await update.message.reply_text(
+                "Hozirda kuryerlar band, iltimos keyinroq urinib ko‘ring.",
+                reply_markup=main_menu(user_id)
+            )
+            return CHOOSING
+
+        cart = context.user_data.get('cart', {})
+        cart_str = str(cart)
+        try:
+            with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("INSERT OR REPLACE INTO users (user_id, name, phone, address) VALUES (?, ?, ?, ?)",
+                          (user_id, context.user_data['name'], context.user_data['phone'], context.user_data['address']))
+                c.execute("INSERT INTO orders (user_id, name, phone, cart, address, delivery_time, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (user_id, context.user_data['name'], context.user_data['phone'], cart_str,
+                           context.user_data['address'], context.user_data['delivery_time'], 'pending'))
+                order_id = c.lastrowid
+                conn.commit()
+
+            user = get_user_by_id(user_id)
+            total = sum(WATER_SIZES[size] * count for size, count in cart.items())
+            order_summary = "\n".join([f"{size} - {count} dona" for size, count in cart.items()])
+            admin_msg = (
+                f"Yangi buyurtma (ID: {order_id}):\n"
+                f"Ism: {context.user_data['name']}\n"
+                f"Telefon: {context.user_data['phone']}\n"
+                f"Suvlar:\n{order_summary}\n"
+                f"Jami: {total} so'm\n"
+                f"Manzil: {context.user_data['address']}\n"
+                f"Yetkazib berish vaqti: {context.user_data['delivery_time']}\n"
+                f"Qarz: {user['debt']} so'm\n"
+                f"Bokallar: {user['bottles']}\n"
+                f"Kullerlar: {user['coolers']}"
+            )
+            free_couriers = get_free_couriers()
+            for courier_id in free_couriers:
+                try:
+                    await context.bot.send_message(
+                        chat_id=courier_id,
+                        text=admin_msg,
+                        reply_markup=order_action_buttons(order_id, 'pending')
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send order notification to courier {courier_id}: {e}")
+
+            admins = list(SUPER_ADMINS) + [tid for tid, expiry in TEMP_ADMINS.items() if datetime.now() < expiry]
+            for admin_id in admins:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=admin_msg
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send order notification to admin {admin_id}: {e}")
+
+            context.user_data.clear()
+            await update.message.reply_text("Buyurtmangiz qabul qilindi! Kuryer tasdiqlashini kuting.", reply_markup=main_menu(user_id))
+            return CHOOSING
+
+        except sqlite3.OperationalError as e:
+            logger.error(f"Database error in confirm_order: {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=main_menu(user_id))
+            return CHOOSING
+
+    elif text == "bekor qilaman":
         context.user_data.clear()
         await update.message.reply_text("Buyurtma bekor qilindi.", reply_markup=main_menu(user_id))
         return CHOOSING
-    if text != "Ha":
-        await update.message.reply_text("Iltimos, 'Ha' yoki 'Bekor qilaman' ni tanlang:", reply_markup=confirm_buttons())
+
+    else:
+        await update.message.reply_text("Iltimos, 'Ha' yoki 'Bekor qilaman' deb yozing.", reply_markup=confirm_buttons())
         return CONFIRM_ORDER
-    try:
-        with sqlite3.connect('water_bot.db', timeout=10) as conn:
-            c = conn.cursor()
-            c.execute("INSERT INTO orders (user_id, name, phone, cart, address, delivery_time, status, order_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                      (user_id, context.user_data['name'], context.user_data['phone'], json.dumps(context.user_data['cart']),
-                       context.user_data['address'], context.user_data['delivery_time'], 'pending', datetime.now().isoformat()))
-            order_id = c.lastrowid
-            conn.commit()
-        add_user_to_db(user_id, context.user_data['name'], context.user_data['phone'], context.user_data['address'])
-        free_couriers = get_free_couriers()
-        if free_couriers:
-            courier_id = free_couriers[0]
-            COURIERS[courier_id]['status'] = 'busy'
-            update_order_status(order_id, 'taken', courier_id)
-            save_global_data()
-            await context.bot.send_message(
-                courier_id,
-                f"Yangi buyurtma #{order_id}:\n{json.dumps(context.user_data['cart'], indent=2)}\nManzil: {context.user_data['address']}\nVaqt: {context.user_data['delivery_time']}",
-                reply_markup=order_action_buttons(order_id, 'taken')
-            )
-            await update.message.reply_text("Buyurtmangiz qabul qilindi va kuryerga yuborildi!", reply_markup=main_menu(user_id))
-        else:
-            await update.message.reply_text("Buyurtmangiz qabul qilindi, lekin hozirda bo‘sh kuryer yo‘q. Iltimos, keyinroq tekshirib turing.", reply_markup=main_menu(user_id))
-        context.user_data.clear()
-        return CHOOSING
-    except sqlite3.OperationalError as e:
-        logger.error(f"Database error in confirm_order: {e}")
-        await update.message.reply_text("Xatolik yuz berdi, iltimos qayta urining.", reply_markup=main_menu(user_id))
-        return CHOOSING
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_data = get_user_by_id(user_id)
-    if not user_data or not user_data['orders']:
+    user = get_user_by_id(user_id)
+    if not user or not user['orders']:
         await update.message.reply_text("Sizda hali buyurtmalar yo‘q.", reply_markup=main_menu(user_id))
         return CHOOSING
-    response = "Sizning buyurtmalaringiz:\n"
-    for order in user_data['orders']:
-        cart = json.loads(order[1])
-        cart_text = "\n".join(f"{size}: {qty} ta" for size, qty in cart.items())
-        status = "Kutilmoqda" if order[4] == 'pending' else "Qabul qilingan" if order[4] == 'taken' else "Yetkazildi"
-        response += f"\nBuyurtma #{order[0]}:\n{cart_text}\nManzil: {order[2]}\nVaqt: {order[3]}\nHolati: {status}\n"
-    await update.message.reply_text(response, reply_markup=main_menu(user_id))
+    msg = "Sizning buyurtmalaringiz:\n\n"
+    for order in user['orders']:
+        cart = eval(order[1])
+        total = sum(WATER_SIZES[size] * count for size, count in cart.items())
+        msg += (
+            f"Buyurtma ID: {order[0]}\n"
+            f"Suvlar: {', '.join([f'{size}: {count}' for size, count in cart.items()])}\n"
+            f"Manzil: {order[2]}\n"
+            f"Yetkazib berish vaqti: {order[3]}\n"
+            f"Status: {order[4]}\n"
+            f"Jami: {total} so'm\n"
+            "--------------------\n"
+        )
+    await update.message.reply_text(msg, reply_markup=main_menu(user_id))
     return CHOOSING
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Sizda admin panelga kirish huquqi yo‘q.", reply_markup=main_menu(user_id))
+        return CHOOSING
     await update.message.reply_text("Admin panel:", reply_markup=admin_panel_buttons(user_id))
     return ADMIN_PANEL
 
@@ -783,77 +849,119 @@ async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             with sqlite3.connect('water_bot.db', timeout=10) as conn:
                 c = conn.cursor()
-                c.execute("SELECT order_id, user_id, name, phone, cart, address, delivery_time, status, courier_id FROM orders")
+                c.execute("SELECT order_id, name, phone, cart, address, delivery_time, status, courier_id FROM orders")
                 orders = c.fetchall()
                 if not orders:
-                    await update.message.reply_text("Hozirda buyurtmalar yo‘q.", reply_markup=admin_panel_buttons(user_id))
+                    await update.message.reply_text("Hozircha buyurtmalar yo‘q.", reply_markup=admin_panel_buttons(user_id))
                     return ADMIN_PANEL
-                response = "Buyurtmalar ro‘yxati:\n"
+                msg = "Buyurtmalar ro‘yxati:\n\n"
                 for order in orders:
-                    cart = json.loads(order[4])
-                    cart_text = "\n".join(f"{size}: {qty} ta" for size, qty in cart.items())
-                    status = "Kutilmoqda" if order[7] == 'pending' else "Qabul qilingan" if order[7] == 'taken' else "Yetkazildi"
-                    courier = COURIERS.get(order[8], {}).get('name', 'Kuryer tayinlanmagan') if order[8] else 'Kuryer tayinlanmagan'
-                    response += f"\nBuyurtma #{order[0]}:\nIsm: {order[2]}\nTelefon: {order[3]}\n{cart_text}\nManzil: {order[5]}\nVaqt: {order[6]}\nHolati: {status}\nKuryer: {courier}\n"
-                await update.message.reply_text(response, reply_markup=admin_panel_buttons(user_id))
+                    cart = eval(order[3])
+                    total = sum(WATER_SIZES[size] * count for size, count in cart.items())
+                    order_summary = "\n".join([f"{size} - {count} dona" for size, count in cart.items()])
+                    courier = COURIERS.get(order[7], {'name': 'Kuryer tayinlanmagan'})['name'] if order[7] else 'Kuryer tayinlanmagan'
+                    msg += (
+                        f"Buyurtma ID: {order[0]}\n"
+                        f"Ism: {order[1]}\n"
+                        f"Telefon: {order[2]}\n"
+                        f"Suvlar:\n{order_summary}\n"
+                        f"Jami: {total} so'm\n"
+                        f"Manzil: {order[4]}\n"
+                        f"Yetkazib berish vaqti: {order[5]}\n"
+                        f"Status: {order[6]}\n"
+                        f"Kuryer: {courier}\n"
+                        "--------------------\n"
+                    )
+                await update.message.reply_text(msg, reply_markup=admin_panel_buttons(user_id))
                 return ADMIN_PANEL
         except sqlite3.OperationalError as e:
-            logger.error(f"Database error in admin_panel_handler: {e}")
-            await update.message.reply_text("Xatolik yuz berdi.", reply_markup=admin_panel_buttons(user_id))
+            logger.error(f"Database error in admin_panel_handler (orders): {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=admin_panel_buttons(user_id))
             return ADMIN_PANEL
 
     if text == "📊 Statistika":
-        total_orders = get_all_orders()
-        daily_orders = get_daily_orders()
-        monthly_orders = get_monthly_orders()
-        yearly_orders = get_yearly_orders()
         top_customer = get_top_customer()
-        top_customer_text = f"Eng faol mijoz: {top_customer[1]} ({top_customer[2]}) - {top_customer[3]} ta buyurtma" if top_customer else "Faol mijoz yo‘q"
-        response = (
-            f"Statistika (faqat yetkazilgan buyurtmalar):\n"
-            f"Jami: {total_orders} ta\n"
-            f"Bugun: {daily_orders} ta\n"
-            f"Oy davomida: {monthly_orders} ta\n"
-            f"Yil davomida: {yearly_orders} ta\n"
-            f"{top_customer_text}"
+        total_orders = get_all_orders()
+        try:
+            with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("SELECT SUM(bottles), SUM(debt) FROM debts")
+                total_bottles, total_debt = c.fetchone()
+                c.execute("SELECT cart FROM orders WHERE status = 'delivered'")
+                total_sales = sum(sum(WATER_SIZES[size] * count for size, count in eval(order[0]).items()) for order in c.fetchall())
+        except sqlite3.OperationalError as e:
+            logger.error(f"Database error in stats: {e}")
+            total_bottles, total_debt, total_sales = 0, 0, 0
+        msg = (
+            f"📊 Statistika:\n"
+            f"Jami buyurtmalar: {total_orders}\n"
+            f"Jami sotilgan bokallar: {total_bottles or 0}\n"
+            f"Jami qarz: {total_debt or 0} so'm\n"
+            f"Jami savdo: {total_sales} so'm\n"
         )
-        await update.message.reply_text(response, reply_markup=admin_panel_buttons(user_id))
+        if top_customer:
+            msg += (
+                f"Eng ko‘p buyurtma bergan mijoz:\n"
+                f"Ism: {top_customer[1]}\n"
+                f"Telefon: {top_customer[2]}\n"
+                f"Buyurtmalar soni: {top_customer[3]}\n"
+            )
+        await update.message.reply_text(msg, reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
 
     if text == "📊 Kuryerlar statistikasi" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        response = "Kuryerlar statistikasi:\n"
-        for courier_id, data in COURIERS.items():
-            orders = get_courier_orders(courier_id)
-            response += f"\nKuryer: {data['name']} ({data['phone']})\nHolati: {'Bo‘sh' if data['status'] == 'free' else 'Band'}\nBuyurtmalar soni: {len(orders)}\n"
-        await update.message.reply_text(response, reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
+        try:
+            with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("""
+                    SELECT c.courier_id, c.name, 
+                           COUNT(co.order_id) as order_count, 
+                           COALESCE(SUM(CASE WHEN o.cart LIKE '%19L%' THEN CAST(SUBSTR(o.cart, INSTR(o.cart, '19L') + 5, INSTR(SUBSTR(o.cart, INSTR(o.cart, '19L')), '}') - 2) AS INTEGER) ELSE 0 END), 0) as total_bottles,
+                           COALESCE(SUM(d.debt), 0) as total_debt
+                    FROM couriers c
+                    LEFT JOIN courier_orders co ON c.courier_id = co.courier_id AND co.status = 'delivered'
+                    LEFT JOIN orders o ON co.order_id = o.order_id
+                    LEFT JOIN debts d ON o.user_id = d.user_id
+                    GROUP BY c.courier_id, c.name
+                """)
+                stats = c.fetchall()
+                if not stats:
+                    await update.message.reply_text("Kuryerlar bo‘yicha statistika yo‘q.", reply_markup=admin_panel_buttons(user_id))
+                    return ADMIN_PANEL
+                msg = "📊 Kuryerlar statistikasi:\n\n"
+                for stat in stats:
+                    msg += (
+                        f"Kuryer: {stat[1]}\n"
+                        f"Buyurtmalar soni: {stat[2]}\n"
+                        f"Sotilgan 19L bokallar: {stat[3]}\n"
+                        f"Mijozlar qarzi: {stat[4]} so'm\n"
+                        "--------------------\n"
+                    )
+                await update.message.reply_text(msg, reply_markup=admin_panel_buttons(user_id))
+                return ADMIN_PANEL
+        except sqlite3.OperationalError as e:
+            logger.error(f"Database error in courier_stats: {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=admin_panel_buttons(user_id))
+            return ADMIN_PANEL
 
     if text == "➕ Super admin qo‘shish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Super admin qo‘shish yoki o‘chirish uchun foydalanuvchi ID sini kiriting (qo‘shish: ID, o‘chirish: remove/ID):", reply_markup=back_button())
+        await update.message.reply_text("Super admin qo‘shish uchun foydalanuvchi ID sini kiriting:", reply_markup=back_button())
         return ADD_SUPER_ADMIN
 
     if text == "➕ Demo admin qo‘shish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Demo admin qo‘shish yoki o‘chirish uchun foydalanuvchi ID sini kiriting (qo‘shish: ID, o‘chirish: remove/ID):", reply_markup=back_button())
+        await update.message.reply_text("Demo admin qo‘shish uchun foydalanuvchi ID sini kiriting:", reply_markup=back_button())
         return ADD_DEMO_ADMIN
 
-    if text == "➕ Temp admin qo‘shish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Temp admin qo‘shish yoki o‘chirish uchun ID va soat sonini kiriting (masalan: ID/soat_soni yoki o‘chirish uchun remove/ID):", reply_markup=back_button())
-        return ADD_TEMP_ADMIN
-
-    if text == "➕ Qarz qo‘shish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Qarz qo‘shish yoki yangilash uchun telefon raqami va qarz miqdorini kiriting (masalan: +998901234567/50000):", reply_markup=back_button())
-        return ADD_DEBT
-
     if text == "➕ Mijoz qo‘shish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Mijoz qo‘shish uchun ma’lumotlarni kiriting (ID/Ism/Telefon/Manzil):", reply_markup=back_button())
+        await update.message.reply_text("Mijoz qo‘shish uchun telefon raqamini (+998XXYYYYYYY) kiriting:", reply_markup=back_button())
         return ADD_CLIENT
 
     if text == "🗑 Mijoz o‘chirish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("O‘chirish uchun mijoz telefon raqamini kiriting:", reply_markup=back_button())
+        await update.message.reply_text("O‘chirish uchun mijozning telefon raqamini (+998XXYYYYYYY) kiriting:", reply_markup=back_button())
         return DELETE_CLIENT
 
     if text == "🔍 Mijoz qidirish":
-        await update.message.reply_text("Mijozni qidirish uchun telefon raqamini kiriting:", reply_markup=back_button())
+        await update.message.reply_text("Mijozni qidirish uchun telefon raqamini (+998XXYYYYYYY) yoki ismini kiriting:", reply_markup=back_button())
         return SEARCH_CLIENT
 
     if text == "🛑 Buyurtmani o‘chirish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
@@ -861,20 +969,16 @@ async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return DELETE_ORDER
 
     if text == "📤 Broadcast yuborish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Broadcast uchun xabarni kiriting:", reply_markup=back_button())
+        await update.message.reply_text("Broadcast uchun xabar matnini kiriting:", reply_markup=back_button())
         return BROADCAST_TEXT
 
     if text == "📢 Aksiyalarni tahrirlash" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Yangi aksiya matnini kiriting:", reply_markup=back_button())
+        await update.message.reply_text("Aksiya indeksini, matnini va rasm fayl nomini kiriting (masalan: 1|5 ta 19L bepul|promo1.jpg):", reply_markup=back_button())
         return EDIT_PROMO
 
     if text == "➕ Kuryer qo‘shish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("Kuryer qo‘shish uchun ma’lumotlarni kiriting (ID/Ism/Telefon):", reply_markup=back_button())
+        await update.message.reply_text("Kuryer qo‘shish uchun ID, ism va telefon raqamini (+998XXYYYYYYY) kiriting (masalan: 123456|Ali|+998901234567):", reply_markup=back_button())
         return ADD_COURIER
-
-    if text == "🗑 Kuryer o‘chirish" and (is_super_admin(user_id) or is_temp_admin(user_id)):
-        await update.message.reply_text("O‘chirish uchun kuryer ID sini kiriting:", reply_markup=back_button())
-        return DELETE_COURIER
 
     await update.message.reply_text("Noto‘g‘ri buyruq. Tugmalardan birini tanlang.", reply_markup=admin_panel_buttons(user_id))
     return ADMIN_PANEL
@@ -885,18 +989,8 @@ async def add_super_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
-    if text.startswith("remove/"):
-        try:
-            admin_id = int(text.split("/")[1])
-            SUPER_ADMINS.discard(admin_id)
-            save_global_data()
-            await update.message.reply_text(f"ID {admin_id} super adminlar ro‘yxatidan o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
-            return ADMIN_PANEL
-        except ValueError:
-            await update.message.reply_text("Iltimos, o‘chirish uchun to‘g‘ri formatda kiriting: remove/ID")
-            return ADD_SUPER_ADMIN
     if not text.isdigit():
-        await update.message.reply_text("Iltimos, faqat raqamli ID kiriting yoki o‘chirish uchun remove/ID formatida yozing.")
+        await update.message.reply_text("Iltimos, faqat raqamli ID kiriting.")
         return ADD_SUPER_ADMIN
     new_admin_id = int(text)
     SUPER_ADMINS.add(new_admin_id)
@@ -910,18 +1004,8 @@ async def add_demo_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
-    if text.startswith("remove/"):
-        try:
-            admin_id = int(text.split("/")[1])
-            DEMO_ADMINS.discard(admin_id)
-            save_global_data()
-            await update.message.reply_text(f"ID {admin_id} demo adminlar ro‘yxatidan o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
-            return ADMIN_PANEL
-        except ValueError:
-            await update.message.reply_text("Iltimos, o‘chirish uchun to‘g‘ri formatda kiriting: remove/ID")
-            return ADD_DEMO_ADMIN
     if not text.isdigit():
-        await update.message.reply_text("Iltimos, faqat raqamli ID kiriting yoki o‘chirish uchun remove/ID formatida yozing.")
+        await update.message.reply_text("Iltimos, faqat raqamli ID kiriting.")
         return ADD_DEMO_ADMIN
     new_admin_id = int(text)
     DEMO_ADMINS.add(new_admin_id)
@@ -929,84 +1013,18 @@ async def add_demo_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"ID {new_admin_id} demo admin sifatida qo‘shildi.", reply_markup=admin_panel_buttons(user_id))
     return ADMIN_PANEL
 
-async def add_temp_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
-        await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
-    if text.startswith("remove/"):
-        try:
-            admin_id = int(text.split("/")[1])
-            TEMP_ADMINS.pop(admin_id, None)
-            save_global_data()
-            await update.message.reply_text(f"ID {admin_id} temp adminlar ro‘yxatidan o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
-            return ADMIN_PANEL
-        except ValueError:
-            await update.message.reply_text("Iltimos, o‘chirish uchun to‘g‘ri formatda kiriting: remove/ID")
-            return ADD_TEMP_ADMIN
-    try:
-        admin_id, hours = text.split('/')
-        admin_id = int(admin_id)
-        hours = int(hours)
-        expiry = datetime.now() + timedelta(hours=hours)
-        TEMP_ADMINS[admin_id] = expiry
-        save_global_data()
-        await update.message.reply_text(f"ID {admin_id} {hours} soatga temp admin sifatida qo‘shildi.", reply_markup=admin_panel_buttons(user_id))
-    except ValueError:
-        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: ID/soat_soni (masalan: 123456/24) yoki o‘chirish uchun remove/ID")
-        return ADD_TEMP_ADMIN
-    return ADMIN_PANEL
-
-async def add_debt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
-        await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
-    try:
-        phone, debt = text.split('/')
-        phone = phone.strip()
-        debt = int(debt)
-        if not re.match(r'^\+998[0-9]{9}$', phone):
-            await update.message.reply_text("Telefon raqami noto‘g‘ri (masalan, +998901234567):", reply_markup=back_button())
-            return ADD_DEBT
-        if debt < 0:
-            await update.message.reply_text("Qarz miqdori 0 dan kichik bo‘lishi mumkin emas.", reply_markup=back_button())
-            return ADD_DEBT
-        user_data = get_user_by_phone(phone)
-        client_user_id = user_data['user_id']
-        action = add_debt_to_db(client_user_id, phone, debt)
-        if action:
-            message = f"{phone} uchun {debt} so‘m qarz muvaffaqiyatli {action}."
-            if not client_user_id:
-                message += "\nEslatma: Bu telefon raqami foydalanuvchilar ro‘yxatida yo‘q. Mijozni qo‘shish uchun 'Mijoz qo‘shish' ni tanlang."
-            await update.message.reply_text(message, reply_markup=admin_panel_buttons(user_id))
-        else:
-            await update.message.reply_text("Ma'lumotlar bazasida xato yuz berdi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
-    except ValueError:
-        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: telefon/qarz_miqdori (masalan: +998901234567/50000)", reply_markup=back_button())
-        return ADD_DEBT
-
 async def add_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
-    try:
-        client_id, name, phone, address = text.split('/')
-        client_id = int(client_id)
-        if not re.match(r'^\+998[0-9]{9}$', phone):
-            await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini kiriting (masalan, +998901234567).", reply_markup=back_button())
-            return ADD_CLIENT
-        add_user_to_db(client_id, name, phone, address)
-        await update.message.reply_text(f"Mijoz {name} qo‘shildi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
-    except ValueError:
-        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: ID/Ism/Telefon/Manzil", reply_markup=back_button())
+    if not re.fullmatch(r'\+998\d{9}', text):
+        await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini (+998XXYYYYYYY) kiriting.")
         return ADD_CLIENT
+    add_user_to_db(0, "Unknown", text)
+    await update.message.reply_text(f"Telefon {text} mijoz sifatida qo‘shildi.", reply_markup=admin_panel_buttons(user_id))
+    return ADMIN_PANEL
 
 async def delete_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -1014,11 +1032,11 @@ async def delete_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
-    if not re.match(r'^\+998[0-9]{9}$', text):
-        await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini kiriting:", reply_markup=back_button())
+    if not re.fullmatch(r'\+998\d{9}', text):
+        await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini (+998XXYYYYYYY) kiriting.")
         return DELETE_CLIENT
     remove_user_from_db(text)
-    await update.message.reply_text(f"Telefon {text} o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
+    await update.message.reply_text(f"Telefon {text} mijozlar ro‘yxatidan o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
     return ADMIN_PANEL
 
 async def search_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1027,24 +1045,51 @@ async def search_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
-    if not re.match(r'^\+998[0-9]{9}$', text):
-        await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini kiriting:", reply_markup=back_button())
-        return SEARCH_CLIENT
-    user_data = get_user_by_phone(text)
-    orders_text = "\n".join(f"Buyurtma #{o[0]}: {o[4]} ({'Yetkazildi' if o[4] == 'delivered' else 'Kutilmoqda' if o[4] == 'pending' else 'Qabul qilingan'})" for o in user_data['orders'])
-    response = (
-        f"Mijoz ma’lumotlari:\n"
-        f"ID: {user_data['user_id'] or 'Yo‘q'}\n"
-        f"Ism: {user_data['name'] or 'Yo‘q'}\n"
-        f"Telefon: {user_data['phone']}\n"
-        f"Manzil: {user_data['address'] or 'Yo‘q'}\n"
-        f"Kullerlar: {user_data['coolers']}\n"
-        f"Bokallar: {user_data['bottles']}\n"
-        f"Qarz: {user_data['debt']} so‘m\n"
-        f"Buyurtmalar:\n{orders_text if orders_text else 'Buyurtmalar yo‘q'}"
-    )
-    await update.message.reply_text(response, reply_markup=admin_panel_buttons(user_id))
-    return ADMIN_PANEL
+    try:
+        with sqlite3.connect('water_bot.db', timeout=10) as conn:
+            c = conn.cursor()
+            if re.fullmatch(r'\+998\d{9}', text):
+                c.execute("SELECT user_id, name, phone, address FROM users WHERE phone = ?", (text,))
+            else:
+                c.execute("SELECT user_id, name, phone, address FROM users WHERE name LIKE ?", (f'%{text}%',))
+            user = c.fetchone()
+            if not user:
+                await update.message.reply_text("Bunday mijoz topilmadi.", reply_markup=admin_panel_buttons(user_id))
+                return ADMIN_PANEL
+            c.execute("SELECT coolers, bottles, debt FROM debts WHERE user_id = ?", (user[0],))
+            debt_info = c.fetchone()
+            c.execute("SELECT order_id, cart, address, delivery_time, status FROM orders WHERE user_id = ?", (user[0],))
+            orders = c.fetchall()
+            msg = (
+                f"Mijoz ma'lumotlari:\n"
+                f"Ism: {user[1]}\n"
+                f"Telefon: {user[2]}\n"
+                f"Manzil: {user[3] or 'Yo‘q'}\n"
+                f"Kullerlar: {debt_info[0] if debt_info else 0}\n"
+                f"Bokallar: {debt_info[1] if debt_info else 0}\n"
+                f"Qarz: {debt_info[2] if debt_info else 0} so'm\n"
+                f"Buyurtmalar soni: {len(orders)}\n"
+            )
+            if orders:
+                msg += "Buyurtmalar:\n"
+                for order in orders:
+                    cart = eval(order[1])
+                    total = sum(WATER_SIZES[size] * count for size, count in cart.items())
+                    msg += (
+                        f"Buyurtma ID: {order[0]}\n"
+                        f"Suvlar: {', '.join([f'{size}: {count}' for size, count in cart.items()])}\n"
+                        f"Manzil: {order[2]}\n"
+                        f"Yetkazib berish vaqti: {order[3]}\n"
+                        f"Status: {order[4]}\n"
+                        f"Jami: {total} so'm\n"
+                        "--------------------\n"
+                    )
+            await update.message.reply_text(msg, reply_markup=admin_panel_buttons(user_id))
+            return ADMIN_PANEL
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database error in search_client: {e}")
+        await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=admin_panel_buttons(user_id))
+        return ADMIN_PANEL
 
 async def delete_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -1053,20 +1098,20 @@ async def delete_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
     if not text.isdigit():
-        await update.message.reply_text("Iltimos, faqat buyurtma ID sini kiriting:", reply_markup=back_button())
+        await update.message.reply_text("Iltimos, faqat raqamli buyurtma ID sini kiriting.")
         return DELETE_ORDER
+    order_id = int(text)
     try:
         with sqlite3.connect('water_bot.db', timeout=10) as conn:
             c = conn.cursor()
-            c.execute("DELETE FROM orders WHERE order_id = ?", (int(text),))
-            c.execute("DELETE FROM courier_orders WHERE order_id = ?", (int(text),))
+            c.execute("DELETE FROM orders WHERE order_id = ?", (order_id,))
+            c.execute("DELETE FROM courier_orders WHERE order_id = ?", (order_id,))
             conn.commit()
-        await update.message.reply_text(f"Buyurtma #{text} o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
+        await update.message.reply_text(f"Buyurtma ID {order_id} o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in delete_order: {e}")
-        await update.message.reply_text("Xatolik yuz berdi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
+        await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=admin_panel_buttons(user_id))
+    return ADMIN_PANEL
 
 async def broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -1079,17 +1124,16 @@ async def broadcast_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c = conn.cursor()
             c.execute("SELECT user_id FROM users")
             users = c.fetchall()
-            for user in users:
-                try:
-                    await context.bot.send_message(user[0], text)
-                except:
-                    continue
-        await update.message.reply_text("Broadcast yuborildi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
+        for uid in users:
+            try:
+                await context.bot.send_message(chat_id=uid[0], text=text)
+            except Exception as e:
+                logger.error(f"Failed to send broadcast to {uid[0]}: {e}")
+        await update.message.reply_text("Broadcast barcha foydalanuvchilarga yuborildi.", reply_markup=admin_panel_buttons(user_id))
     except sqlite3.OperationalError as e:
         logger.error(f"Database error in broadcast_text: {e}")
-        await update.message.reply_text("Xatolik yuz berdi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
+        await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=admin_panel_buttons(user_id))
+    return ADMIN_PANEL
 
 async def edit_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -1097,9 +1141,22 @@ async def edit_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
-    PROMOS.append({"text": text})
-    save_global_data()
-    await update.message.reply_text("Aksiya qo‘shildi.", reply_markup=admin_panel_buttons(user_id))
+    try:
+        index, promo_text, image_filename = text.split('|')
+        index = int(index) - 1
+        if index < 0 or index >= len(PROMOS):
+            await update.message.reply_text("Noto‘g‘ri indeks. Aksiyalar ro‘yxatida 1 dan {} gacha indekslar mavjud.".format(len(PROMOS)), reply_markup=admin_panel_buttons(user_id))
+            return ADMIN_PANEL
+        image_path = os.path.join(IMAGE_DIR, image_filename)
+        if not os.path.exists(image_path):
+            await update.message.reply_text("Rasm fayli topilmadi. Iltimos, faylni '{}' papkasiga joylang.".format(IMAGE_DIR), reply_markup=admin_panel_buttons(user_id))
+            return EDIT_PROMO
+        PROMOS[index] = {'text': promo_text, 'image': image_path}
+        save_global_data()
+        await update.message.reply_text(f"Aksiya {index+1} tahrirlandi.", reply_markup=admin_panel_buttons(user_id))
+    except ValueError:
+        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: indeks|matn|rasm_fayl_nomi")
+        return EDIT_PROMO
     return ADMIN_PANEL
 
 async def add_courier(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1109,106 +1166,125 @@ async def add_courier(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
         return ADMIN_PANEL
     try:
-        courier_id, name, phone = text.split('/')
+        courier_id, name, phone = text.split('|')
         courier_id = int(courier_id)
-        if not re.match(r'^\+998[0-9]{9}$', phone):
-            await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini kiriting (masalan, +998901234567).", reply_markup=back_button())
+        if not re.fullmatch(r'\+998\d{9}', phone):
+            await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini (+998XXYYYYYYY) kiriting.")
             return ADD_COURIER
         add_courier_to_db(courier_id, name, phone)
         await update.message.reply_text(f"Kuryer {name} qo‘shildi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
     except ValueError:
-        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: ID/Ism/Telefon", reply_markup=back_button())
+        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: ID|Ism|Telefon")
         return ADD_COURIER
-
-async def delete_courier(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user_id = update.effective_user.id
-    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
-        await update.message.reply_text("Admin panelga qaytdingiz.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
-    if not text.isdigit():
-        await update.message.reply_text("Iltimos, faqat raqamli kuryer ID sini kiriting.", reply_markup=back_button())
-        return DELETE_COURIER
-    courier_id = int(text)
-    if courier_id not in COURIERS:
-        await update.message.reply_text(f"Kuryer ID {courier_id} topilmadi.", reply_markup=admin_panel_buttons(user_id))
-        return ADMIN_PANEL
-    remove_courier_from_db(courier_id)
-    await update.message.reply_text(f"Kuryer ID {courier_id} o‘chirildi.", reply_markup=admin_panel_buttons(user_id))
     return ADMIN_PANEL
 
 async def courier_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if not is_courier(user_id):
+        await update.message.reply_text("Sizda kuryer paneliga kirish huquqi yo‘q.", reply_markup=main_menu(user_id))
+        return CHOOSING
     await update.message.reply_text("Kuryer panel:", reply_markup=courier_panel_buttons())
     return COURIER_PANEL
 
 async def courier_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+
     if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
         await update.message.reply_text("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(user_id))
         return CHOOSING
+
     if text == "📋 Mening buyurtmalarim":
         orders = get_courier_orders(user_id)
         if not orders:
-            await update.message.reply_text("Sizda buyurtmalar yo‘q.", reply_markup=courier_panel_buttons())
+            await update.message.reply_text("Sizda hali buyurtmalar yo‘q.", reply_markup=courier_panel_buttons())
             return COURIER_PANEL
-        response = "Sizning buyurtmalaringiz:\n"
+        msg = "Sizning buyurtmalaringiz:\n\n"
         try:
             with sqlite3.connect('water_bot.db', timeout=10) as conn:
                 c = conn.cursor()
                 for order in orders:
-                    c.execute("SELECT cart, address, delivery_time, status FROM orders WHERE order_id = ?", (order[0],))
-                    order_data = c.fetchone()
-                    if order_data:
-                        cart = json.loads(order_data[0])
-                        cart_text = "\n".join(f"{size}: {qty} ta" for size, qty in cart.items())
-                        status = "Kutilmoqda" if order_data[3] == 'pending' else "Qabul qilingan" if order_data[3] == 'taken' else "Yetkazildi"
-                        response += f"\nBuyurtma #{order[0]}:\n{cart_text}\nManzil: {order_data[1]}\nVaqt: {order_data[2]}\nHolati: {status}\n"
-                        if order_data[3] in ['pending', 'taken']:
-                            response += f"\n{order_action_buttons(order[0], order_data[3]).to_dict()}\n"
-            await update.message.reply_text(response, reply_markup=courier_panel_buttons())
-            return COURIER_PANEL
+                    c.execute("SELECT name, phone, cart, address, delivery_time, status FROM orders WHERE order_id = ?", (order[0],))
+                    order_info = c.fetchone()
+                    if order_info:
+                        cart = eval(order_info[2])
+                        total = sum(WATER_SIZES[size] * count for size, count in cart.items())
+                        msg += (
+                            f"Buyurtma ID: {order[0]}\n"
+                            f"Ism: {order_info[0]}\n"
+                            f"Telefon: {order_info[1]}\n"
+                            f"Suvlar: {', '.join([f'{size}: {count}' for size, count in cart.items()])}\n"
+                            f"Jami: {total} so'm\n"
+                            f"Manzil: {order_info[3]}\n"
+                            f"Yetkazib berish vaqti: {order_info[4]}\n"
+                            f"Status: {order_info[5]}\n"
+                            "--------------------\n"
+                        )
+            await update.message.reply_text(msg, reply_markup=courier_panel_buttons())
         except sqlite3.OperationalError as e:
-            logger.error(f"Database error in courier_panel_handler: {e}")
-            await update.message.reply_text("Xatolik yuz berdi.", reply_markup=courier_panel_buttons())
-            return COURIER_PANEL
+            logger.error(f"Database error in courier_orders: {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=courier_panel_buttons())
+        return COURIER_PANEL
+
     if text == "📊 Qarzlar":
+        await update.message.reply_text("Mijozning telefon raqamini (+998XXYYYYYYY) kiriting:", reply_markup=back_button())
+        return COURIER_DEBT_UPDATE
+
+    if text == "✅ Bo'shman":
         try:
             with sqlite3.connect('water_bot.db', timeout=10) as conn:
                 c = conn.cursor()
-                c.execute("SELECT user_id, name, phone, coolers, bottles, debt FROM debts JOIN users USING (user_id)")
-                debts = c.fetchall()
-                if not debts:
-                    await update.message.reply_text("Qarzlar yo‘q.", reply_markup=courier_panel_buttons())
-                    return COURIER_PANEL
-                response = "Qarzlar ro‘yxati:\n"
-                for debt in debts:
-                    response += f"\nMijoz: {debt[1]} ({debt[2]})\nKullerlar: {debt[3]}\nBokallar: {debt[4]}\nQarz: {debt[5]} so‘m\n"
-                await update.message.reply_text(response, reply_markup=courier_panel_buttons())
-                return COURIER_PANEL
-        except sqlite3.OperationalError as e:
-            logger.error(f"Database error in courier_panel_handler: {e}")
-            await update.message.reply_text("Xatolik yuz berdi.", reply_markup=courier_panel_buttons())
-            return COURIER_PANEL
-    if text in ["✅ Bo'shman", "❌ Bandman"]:
-        status = 'free' if text == "✅ Bo'shman" else 'busy'
-        COURIERS[user_id]['status'] = status
-        try:
-            with sqlite3.connect('water_bot.db', timeout=10) as conn:
-                c = conn.cursor()
-                c.execute("UPDATE couriers SET status = ? WHERE courier_id = ?", (status, user_id))
+                c.execute("UPDATE couriers SET status = 'free' WHERE courier_id = ?", (user_id,))
                 conn.commit()
+            COURIERS[user_id]['status'] = 'free'
             save_global_data()
-            await update.message.reply_text(f"Sizning holatingiz: {status}", reply_markup=courier_panel_buttons())
-            return COURIER_PANEL
+            await update.message.reply_text("Sizning statusingiz: Bo'sh.", reply_markup=courier_panel_buttons())
         except sqlite3.OperationalError as e:
-            logger.error(f"Database error in courier_panel_handler: {e}")
-            await update.message.reply_text("Xatolik yuz berdi.", reply_markup=courier_panel_buttons())
-            return COURIER_PANEL
+            logger.error(f"Database error in set_courier_status: {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=courier_panel_buttons())
+        return COURIER_PANEL
+
+    if text == "❌ Bandman":
+        try:
+            with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("UPDATE couriers SET status = 'busy' WHERE courier_id = ?", (user_id,))
+                conn.commit()
+            COURIERS[user_id]['status'] = 'busy'
+            save_global_data()
+            await update.message.reply_text("Sizning statusingiz: Band.", reply_markup=courier_panel_buttons())
+        except sqlite3.OperationalError as e:
+            logger.error(f"Database error in set_courier_status: {e}")
+            await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.", reply_markup=courier_panel_buttons())
+        return COURIER_PANEL
+
     await update.message.reply_text("Noto‘g‘ri buyruq. Tugmalardan birini tanlang.", reply_markup=courier_panel_buttons())
     return COURIER_PANEL
+
+async def courier_debt_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if text in ["⬅️ Ortga", "🏠 Asosiy menyu"]:
+        await update.message.reply_text("Kuryer panelga qaytdingiz.", reply_markup=courier_panel_buttons())
+        return COURIER_PANEL
+    if not re.fullmatch(r'\+998\d{9}', text):
+        await update.message.reply_text("Iltimos, to‘g‘ri telefon raqamini (+998XXYYYYYYY) kiriting.")
+        return COURIER_DEBT_UPDATE
+    user = get_user_by_phone(text)
+    if not user:
+        await update.message.reply_text("Bunday mijoz topilmadi.", reply_markup=courier_panel_buttons())
+        return COURIER_PANEL
+    await update.message.reply_text(
+        f"Mijoz: {user['name']}\n"
+        f"Telefon: {user['phone']}\n"
+        f"Kullerlar: {user['coolers']}\n"
+        f"Bokallar: {user['bottles']}\n"
+        f"Qarz: {user['debt']} so'm\n\n"
+        "Qarzni yangilash uchun formatda yozing: kullerlar|bokallar|qarz (masalan: 2|5|10000)",
+        reply_markup=back_button()
+    )
+    context.user_data['debt_phone'] = text
+    return COURIER_DEBT_UPDATE
 
 async def update_debt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -1217,58 +1293,112 @@ async def update_debt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Kuryer panelga qaytdingiz.", reply_markup=courier_panel_buttons())
         return COURIER_PANEL
     try:
-        client_phone, coolers, bottles, debt = text.split('/')
-        coolers, bottles, debt = int(coolers), int(bottles), int(debt)
-        user_data = get_user_by_phone(client_phone)
-        if not user_data['user_id']:
-            await update.message.reply_text(f"Telefon {client_phone} topilmadi.", reply_markup=courier_panel_buttons())
+        coolers, bottles, debt = map(int, text.split('|'))
+        phone = context.user_data.get('debt_phone')
+        if not phone:
+            await update.message.reply_text("Xatolik: Telefon raqami topilmadi.", reply_markup=courier_panel_buttons())
             return COURIER_PANEL
-        update_debt(user_data['user_id'], client_phone, coolers, bottles, debt)
-        await update.message.reply_text(f"Qarz yangilandi: {client_phone}", reply_markup=courier_panel_buttons())
+        user = get_user_by_phone(phone)
+        if not user:
+            await update.message.reply_text("Bunday mijoz topilmadi.", reply_markup=courier_panel_buttons())
+            return COURIER_PANEL
+        update_debt(user['user_id'], coolers, bottles, debt)
+        await update.message.reply_text(
+            f"Qarz yangilandi:\n"
+            f"Kullerlar: +{coolers}\n"
+            f"Bokallar: +{bottles}\n"
+            f"Qarz: +{debt} so'm",
+            reply_markup=courier_panel_buttons()
+        )
         return COURIER_PANEL
     except ValueError:
-        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: Telefon/Kullerlar/Bokallar/Qarz", reply_markup=back_button())
+        await update.message.reply_text("Iltimos, to‘g‘ri formatda kiriting: kullerlar|bokallar|qarz (masalan: 2|5|10000)")
         return COURIER_DEBT_UPDATE
-
-async def order_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     if not is_courier(user_id):
-        await query.message.reply_text("Siz kuryer emassiz!")
+        await query.message.reply_text("Sizda buyurtma bilan ishlash huquqi yo‘q.")
         return
-    action, order_id = query.data.split('/')
+    action, order_id = query.data.split('_')
     order_id = int(order_id)
     try:
         with sqlite3.connect('water_bot.db', timeout=10) as conn:
             c = conn.cursor()
-            c.execute("SELECT status FROM orders WHERE order_id = ?", (order_id,))
+            c.execute("SELECT status, user_id FROM orders WHERE order_id = ?", (order_id,))
             order = c.fetchone()
             if not order:
-                await query.message.reply_text("Buyurtma topilmadi!")
+                await query.message.reply_text("Buyurtma topilmadi.")
                 return
-            if action == "take":
-                if order[0] != 'pending':
-                    await query.message.reply_text("Bu buyurtma allaqachon qabul qilingan yoki yetkazilgan!")
-                    return
+            status, client_id = order
+            if action == "take" and status == 'pending':
                 update_order_status(order_id, 'taken', user_id)
                 COURIERS[user_id]['status'] = 'busy'
                 save_global_data()
-                await query.message.reply_text("Buyurtma qabul qilindi!", reply_markup=order_action_buttons(order_id, 'taken'))
-            elif action == "deliver":
-                if order[0] not in ['pending', 'taken']:
-                    await query.message.reply_text("Bu buyurtma allaqachon yetkazilgan!")
-                    return
+                with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE couriers SET status = 'busy' WHERE courier_id = ?", (user_id,))
+                    conn.commit()
+                await query.message.reply_text(f"Buyurtma ID {order_id} qabul qilindi.")
+                try:
+                    await context.bot.send_message(
+                        chat_id=client_id,
+                        text=f"Buyurtma ID {order_id} kuryer tomonidan qabul qilindi."
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify client {client_id}: {e}")
+                admins = list(SUPER_ADMINS) + [tid for tid, expiry in TEMP_ADMINS.items() if datetime.now() < expiry]
+                for admin_id in admins:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin_id,
+                            text=f"Buyurtma ID {order_id} kuryer {COURIERS[user_id]['name']} tomonidan qabul qilindi."
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to notify admin {admin_id}: {e}")
+            elif action == "deliver" and status in ['pending', 'taken']:
                 update_order_status(order_id, 'delivered', user_id)
                 COURIERS[user_id]['status'] = 'free'
                 save_global_data()
-                await query.message.reply_text("Buyurtma yetkazildi!", reply_markup=courier_panel_buttons())
+                with sqlite3.connect('water_bot.db', timeout=10) as conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE couriers SET status = 'free' WHERE courier_id = ?", (user_id,))
+                    c.execute("SELECT cart FROM orders WHERE order_id = ?", (order_id,))
+                    cart = eval(c.fetchone()[0])
+                    bottles_19L = cart.get('19L', 0)
+                    c.execute("UPDATE debts SET bottles = bottles + ? WHERE user_id = ?", (bottles_19L, client_id))
+                    conn.commit()
+                await query.message.reply_text(f"Buyurtma ID {order_id} yetkazib berildi.")
+                try:
+                    await context.bot.send_message(
+                        chat_id=client_id,
+                        text=f"Buyurtma ID {order_id} yetkazib berildi. Rahmat!"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify client {client_id}: {e}")
+                admins = list(SUPER_ADMINS) + [tid for tid, expiry in TEMP_ADMINS.items() if datetime.now() < expiry]
+                for admin_id in admins:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin_id,
+                            text=f"Buyurtma ID {order_id} kuryer {COURIERS[user_id]['name']} tomonidan yetkazib berildi."
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to notify admin {admin_id}: {e}")
+            else:
+                await query.message.reply_text("Noto‘g‘ri harakat yoki buyurtma statusi.")
     except sqlite3.OperationalError as e:
-        logger.error(f"Database error in order_action_callback: {e}")
-        await query.message.reply_text("Xatolik yuz berdi!")
+        logger.error(f"Database error in order_action: {e}")
+        await query.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko‘ring.")
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and update.message:
+        await update.message.reply_text("Xatolik yuz berdi, iltimos qaytadan urinib ko‘ring.")
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
+
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -1277,15 +1407,13 @@ def main():
             GET_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
             WATER_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, water_select)],
             WATER_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, water_quantity)],
-            CART_SHOW: [MessageHandler(filters.TEXT & ~filters.COMMAND, show_cart)],
-            LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, location_handler), MessageHandler(filters.LOCATION, location_handler)],
+            LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, location_handler),
+                      MessageHandler(filters.LOCATION, location_handler)],
             DELIVERY_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_time_handler)],
             CONFIRM_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order)],
             ADMIN_PANEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_handler)],
             ADD_SUPER_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_super_admin)],
             ADD_DEMO_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_demo_admin)],
-            ADD_TEMP_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_temp_admin)],
-            ADD_DEBT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_debt)],
             ADD_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_client)],
             DELETE_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_client)],
             SEARCH_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_client)],
@@ -1293,15 +1421,18 @@ def main():
             BROADCAST_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_text)],
             EDIT_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_promo)],
             ADD_COURIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_courier)],
-            DELETE_COURIER: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_courier)],
             COURIER_PANEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, courier_panel_handler)],
             COURIER_DEBT_UPDATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_debt_handler)],
         },
         fallbacks=[CommandHandler('start', start)],
     )
+
     app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(order_action_callback))
+    app.add_handler(CallbackQueryHandler(order_action))
+    app.add_error_handler(error_handler)
+
     app.run_polling()
 
 if __name__ == '__main__':
     main()
+
